@@ -23,6 +23,14 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
 
+from utils.rag import (
+    RAGRetriever,
+    append_document,
+    build_clinical_text,
+    next_mrno,
+    report_to_full_document,
+)
+
 
 # ---------------------------------------------------------------------------
 # Environment & client setup
@@ -57,9 +65,12 @@ MODEL = "gpt-4o-mini"
 TEMP_R1 = 0.2
 TEMP_R2 = 0.25
 TEMP_MOD = 0.2
+TEMP_VALIDATOR = 0.2
 MAX_TOKENS_AGENT = 800
 MAX_TOKENS_MODERATOR = 1600
+MAX_TOKENS_VALIDATOR = 1800
 RETRY_ATTEMPTS = 2
+RAG_K = 5
 SAMPLE_PATIENT_PATH = Path("data") / "sample-patient-info.json"
 
 AGENT_ORDER: List[str] = [
@@ -198,6 +209,26 @@ Return ONLY a single JSON object that matches this schema exactly (no prose, no 
   "agent_consensus_notes": "Summary of agreements and major disagreements from Round 2"
 }
 Confidence values must be integers 0-100. Numeric cost fields must be plain numbers (no currency strings). If a value is genuinely unknown, choose the most defensible estimate and explain it inside the relevant string field rather than leaving the JSON malformed."""
+
+
+RAG_VALIDATOR_SYSTEM_PROMPT = """You are the MDT chairperson reviewing your own draft consensus against k similar historical cases retrieved from the hospital RAG corpus.
+
+Inputs you will receive:
+- DRAFT_CONSENSUS_JSON: your earlier output for this patient.
+- PATIENT_SUMMARY: the same clinical summary the agents debated.
+- RETRIEVED_CASES: k examples, each with their clinical presentation, final diagnosis, reasoning, ICD-10 codes, and a similarity score (cosine, higher = more similar).
+
+Rules:
+1. If a clear majority of retrieved cases support the primary diagnosis (semantically equivalent labels count), KEEP it and raise diagnosis.confidence by 5-15 (cap at 95).
+2. If retrieved cases consistently point to a different label, REPLACE primary_diagnosis with the better-supported label and set a defensible confidence (40-80 depending on agreement strength). Update differentials, evidence_summary, and pharmacotherapy.regimen as needed to stay internally consistent.
+3. If retrieved cases are mixed or only weakly relevant, KEEP the diagnosis but lower confidence by 5-10.
+4. Preserve all other fields from the draft (treatment_plan, cost_analysis, unresolved_issues, agent_consensus_notes) unless a corrected diagnosis logically requires changing them.
+5. Add EXACTLY two new fields at the top level:
+     "rag_validation_notes": string explaining the comparison and decision (cite MRNos),
+     "retrieved_cases_summary": list of {"mrno": int, "diagnosis": "string", "score": number}
+6. Confidence values remain integers 0-100. Numeric cost fields remain plain numbers.
+
+Return ONLY a single JSON object that matches the original consensus schema PLUS the two new fields. No prose, no markdown fences."""
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +556,121 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
     }
 
 
+@st.cache_resource(show_spinner="Loading RAG index...")
+def get_retriever() -> Optional[RAGRetriever]:
+    """Load the FAISS-backed retriever once per Streamlit session.
+
+    Returns ``None`` if the index cannot be loaded; callers should treat that
+    as "RAG validation unavailable" and fall back to the draft consensus.
+    """
+    try:
+        return RAGRetriever(api_key=API_KEY)
+    except Exception as exc:  # noqa: BLE001 - surfaced once via UI warning
+        st.warning(
+            f"RAG index unavailable, validation phase will be skipped: {exc}"
+        )
+        return None
+
+
+def _format_retrieved_cases(cases: List[Dict[str, Any]]) -> str:
+    if not cases:
+        return "No retrieved cases."
+    blocks = []
+    for c in cases:
+        meta = c.get("metadata", {}) or {}
+        icd = ", ".join(meta.get("icd_codes") or []) or "n/a"
+        blocks.append(
+            f"### Case rank {c.get('rank')}  "
+            f"(MRNo {meta.get('mrno', 'n/a')}, score {c.get('score', 0):.3f})\n"
+            f"Diagnosis: {meta.get('diagnosis', 'n/a')}\n"
+            f"ICD-10: {icd}\n"
+            f"Reasoning: {meta.get('reasoning', 'n/a')}\n"
+            f"---\n{c.get('document', '')}"
+        )
+    return "\n\n".join(blocks)
+
+
+def validate_with_rag(
+    draft_report: Dict[str, Any],
+    patient_data: Dict[str, Any],
+    retriever: RAGRetriever,
+    k: int = RAG_K,
+) -> Dict[str, Any]:
+    """Run the second-pass validator using k retrieved similar cases.
+
+    Returns a new consensus dict with the same schema plus
+    ``rag_validation_notes`` and ``retrieved_cases_summary``. The list of raw
+    retrieved cases (with full documents) is attached under the private key
+    ``_retrieved_cases`` so the UI can render them.
+    """
+    clinical_text = build_clinical_text(patient_data)
+
+    exclude: List[int] = []
+    pid_raw = patient_data.get("patient_id")
+    try:
+        if pid_raw is not None:
+            exclude.append(int(pid_raw))
+    except (TypeError, ValueError):
+        pass
+
+    cases = retriever.retrieve(
+        clinical_text, k=k, exclude_mrnos=exclude or None
+    )
+
+    user_payload = (
+        f"PATIENT_SUMMARY:\n{build_patient_summary(patient_data)}\n\n"
+        f"DRAFT_CONSENSUS_JSON:\n{json.dumps(draft_report, indent=2)}\n\n"
+        f"RETRIEVED_CASES (k={len(cases)}):\n{_format_retrieved_cases(cases)}\n\n"
+        "Now produce the validated consensus JSON. Return ONLY the JSON."
+    )
+    messages = [
+        {"role": "system", "content": RAG_VALIDATOR_SYSTEM_PROMPT},
+        {"role": "user", "content": user_payload},
+    ]
+    raw = call_agent(
+        messages,
+        temperature=TEMP_VALIDATOR,
+        max_tokens=MAX_TOKENS_VALIDATOR,
+        response_format={"type": "json_object"},
+    )
+    validated = _extract_json_object(raw)
+    validated["_retrieved_cases"] = cases
+    return validated
+
+
+def persist_approved_case(
+    patient_data: Dict[str, Any],
+    validated_report: Dict[str, Any],
+    retriever: RAGRetriever,
+) -> Dict[str, Any]:
+    """Append an approved patient + diagnosis to the on-disk RAG index.
+
+    Returns a dict with the assigned ``mrno`` and the diagnosis used for the
+    new metadata entry.
+    """
+    clinical_text = build_clinical_text(patient_data)
+    full_document = report_to_full_document(clinical_text, validated_report)
+
+    diag = validated_report.get("diagnosis", {}) or {}
+    primary = str(diag.get("primary_diagnosis", "") or "")
+    reasoning = str(diag.get("evidence_summary", "") or "")
+
+    icd_codes: List[str] = []
+    if isinstance(diag.get("icd_codes"), list):
+        icd_codes = [str(c) for c in diag["icd_codes"] if c]
+    elif isinstance(validated_report.get("icd_codes"), list):
+        icd_codes = [str(c) for c in validated_report["icd_codes"] if c]
+
+    metadata = {
+        "mrno": next_mrno(retriever._metadata),  # noqa: SLF001 - intentional
+        "diagnosis": primary,
+        "reasoning": reasoning,
+        "icd_codes": icd_codes,
+    }
+    assigned = append_document(retriever, clinical_text, full_document, metadata)
+    return {"mrno": assigned, "diagnosis": primary}
+
+
 def call_moderator(
     patient_summary: str,
     round1: List[Dict[str, str]],
@@ -651,6 +797,10 @@ def _init_session_state() -> None:
         "round1_transcript": [],
         "round2_transcript": [],
         "final_report": None,
+        "validated_report": None,
+        "rag_examples": [],
+        "user_verdict": None,
+        "rag_persist_message": None,
         "debate_complete": False,
         "patient_source": None,
     }
@@ -663,6 +813,10 @@ def _reset_debate_state() -> None:
     st.session_state.round1_transcript = []
     st.session_state.round2_transcript = []
     st.session_state.final_report = None
+    st.session_state.validated_report = None
+    st.session_state.rag_examples = []
+    st.session_state.user_verdict = None
+    st.session_state.rag_persist_message = None
     st.session_state.debate_complete = False
 
 
@@ -755,7 +909,7 @@ def _run_debate() -> None:
 
     _reset_debate_state()
 
-    total_steps = len(AGENT_ORDER) * 2 + 1
+    total_steps = len(AGENT_ORDER) * 2 + 2
     progress_bar = st.progress(0.0, text="Preparing MDT debate...")
 
     def _bump(step_idx: int, label: str) -> None:
@@ -803,6 +957,37 @@ def _run_debate() -> None:
             st.write("Moderator synthesising consensus report...")
             report = call_moderator(patient_summary, r1, r2, patient_id)
             st.session_state.final_report = report
+            _bump(
+                len(AGENT_ORDER) * 2 + 1,
+                "Moderator draft complete",
+            )
+
+            status.update(label="RAG validation", state="running")
+            st.write("Retrieving similar cases and re-evaluating diagnosis...")
+            retriever = get_retriever()
+            if retriever is not None and "_parse_error" not in report:
+                try:
+                    validated = validate_with_rag(report, data, retriever)
+                    st.session_state.validated_report = validated
+                    st.session_state.rag_examples = validated.get(
+                        "_retrieved_cases", []
+                    )
+                    st.write(
+                        f"Validated against {len(st.session_state.rag_examples)} "
+                        "retrieved cases."
+                    )
+                except Exception as exc:  # noqa: BLE001 - surfaced in UI
+                    st.warning(
+                        f"RAG validation failed, using draft consensus: {exc}"
+                    )
+                    st.session_state.validated_report = None
+                    st.session_state.rag_examples = []
+            else:
+                if "_parse_error" in report:
+                    st.info("Skipping RAG validation: draft consensus did not parse.")
+                st.session_state.validated_report = None
+                st.session_state.rag_examples = []
+
             st.session_state.debate_complete = True
             _bump(total_steps, "Done")
             status.update(label="MDT debate complete.", state="complete")
@@ -965,17 +1150,126 @@ def _render_debate_tab() -> None:
         )
 
 
+def _render_retrieved_cases_panel(cases: List[Dict[str, Any]]) -> None:
+    if not cases:
+        st.caption("No retrieved cases.")
+        return
+    for c in cases:
+        meta = c.get("metadata", {}) or {}
+        header = (
+            f"Rank {c.get('rank', '?')} - MRNo {meta.get('mrno', 'n/a')} "
+            f"- {meta.get('diagnosis', 'n/a')} (score {c.get('score', 0):.3f})"
+        )
+        with st.expander(header):
+            icd = ", ".join(meta.get("icd_codes") or []) or "n/a"
+            st.markdown(f"**ICD-10:** {icd}")
+            if meta.get("reasoning"):
+                st.markdown(f"**Reasoning:** {meta['reasoning']}")
+            st.markdown("**Document:**")
+            st.code(c.get("document", ""))
+
+
+def _render_verification_controls(
+    report: Dict[str, Any], patient_data: Dict[str, Any]
+) -> None:
+    """Approve / Disapprove buttons that gate writing back to the RAG index."""
+    st.subheader("Verify result")
+    verdict = st.session_state.get("user_verdict")
+    persist_msg = st.session_state.get("rag_persist_message")
+
+    if verdict == "approved":
+        st.success(persist_msg or "Result approved. Added to RAG corpus.")
+        return
+    if verdict == "rejected":
+        st.warning("Result disapproved. RAG corpus was not updated.")
+        return
+
+    st.caption(
+        "If you approve, this patient (clinical summary + final diagnosis) is "
+        "added to the RAG index so future cases can retrieve it. If you "
+        "disapprove, nothing is written."
+    )
+
+    btn_l, btn_r = st.columns(2)
+    with btn_l:
+        approve = st.button(
+            "Approve & add to RAG",
+            type="primary",
+            use_container_width=True,
+            key="approve_btn",
+        )
+    with btn_r:
+        disapprove = st.button(
+            "Disapprove",
+            use_container_width=True,
+            key="disapprove_btn",
+        )
+
+    if approve:
+        retriever = get_retriever()
+        if retriever is None:
+            st.error("RAG index not available; cannot persist this case.")
+            return
+        try:
+            info = persist_approved_case(patient_data, report, retriever)
+            st.session_state.user_verdict = "approved"
+            st.session_state.rag_persist_message = (
+                f"Added to RAG corpus as MRNo {info['mrno']} "
+                f"(diagnosis: {info['diagnosis']})."
+            )
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001 - shown to user
+            st.error(f"Failed to add case to RAG corpus: {exc}")
+    elif disapprove:
+        st.session_state.user_verdict = "rejected"
+        st.rerun()
+
+
 def _render_consensus_tab() -> None:
-    report = st.session_state.final_report
-    if not report:
+    draft = st.session_state.final_report
+    validated = st.session_state.validated_report
+    if not draft and not validated:
         st.info("The moderator has not produced a consensus report yet.")
         return
 
-    if "_parse_error" in report:
-        st.error(report["_parse_error"])
+    using_validated = validated is not None and "_parse_error" not in validated
+    report = validated if using_validated else draft
+
+    if report is None or "_parse_error" in report:
+        bad = report or {}
+        st.error(bad.get("_parse_error", "Consensus report unavailable."))
         with st.expander("Raw moderator response"):
-            st.code(report.get("raw_response", ""))
+            st.code(bad.get("raw_response", ""))
         return
+
+    if using_validated:
+        st.success(
+            "Showing RAG-validated consensus (k-shot grounded against retrieved "
+            "similar cases)."
+        )
+        if draft and "_parse_error" not in draft:
+            try:
+                draft_conf = int((draft.get("diagnosis") or {}).get("confidence", 0) or 0)
+                final_conf = int((report.get("diagnosis") or {}).get("confidence", 0) or 0)
+                delta = final_conf - draft_conf
+                draft_dx = (draft.get("diagnosis") or {}).get("primary_diagnosis", "")
+                final_dx = (report.get("diagnosis") or {}).get("primary_diagnosis", "")
+                if draft_dx and final_dx and draft_dx != final_dx:
+                    st.caption(
+                        f"Diagnosis revised after RAG: '{draft_dx}' -> '{final_dx}'."
+                    )
+                if delta != 0:
+                    st.caption(
+                        f"Confidence change after RAG: {draft_conf}% -> "
+                        f"{final_conf}% ({delta:+d})."
+                    )
+            except (TypeError, ValueError):
+                pass
+    else:
+        st.warning(
+            "Showing draft consensus only - RAG validation was unavailable or "
+            "skipped."
+        )
 
     diag = report.get("diagnosis", {}) or {}
     plan = report.get("treatment_plan", {}) or {}
@@ -1064,12 +1358,27 @@ def _render_consensus_tab() -> None:
         st.subheader("Agent consensus notes")
         st.write(report["agent_consensus_notes"])
 
-    with st.expander("Raw consensus JSON"):
-        st.json(report)
+    if using_validated and report.get("rag_validation_notes"):
+        st.subheader("RAG validation notes")
+        st.write(report["rag_validation_notes"])
 
-    json_bytes = json.dumps(report, indent=2).encode("utf-8")
-    md_bytes = report_to_markdown(report).encode("utf-8")
-    pid = report.get("patient_id", "patient")
+    rag_cases = st.session_state.get("rag_examples") or []
+    if rag_cases:
+        with st.expander(f"Retrieved similar cases ({len(rag_cases)})"):
+            _render_retrieved_cases_panel(rag_cases)
+
+    if st.session_state.get("patient_data"):
+        _render_verification_controls(report, st.session_state.patient_data)
+
+    with st.expander("Raw consensus JSON"):
+        st.json(
+            {k: v for k, v in report.items() if not k.startswith("_")}
+        )
+
+    public_report = {k: v for k, v in report.items() if not k.startswith("_")}
+    json_bytes = json.dumps(public_report, indent=2).encode("utf-8")
+    md_bytes = report_to_markdown(public_report).encode("utf-8")
+    pid = public_report.get("patient_id", "patient")
     dl_l, dl_r = st.columns(2)
     with dl_l:
         st.download_button(
