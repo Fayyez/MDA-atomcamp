@@ -1,0 +1,14 @@
+{
+    "MRNo": 1,
+    "Diagnosis": "Possible Pneumonia",
+    "Reasoning": "The patient presents with shortness of breath, productive cough, low-grade fever, and has a history of rheumatoid arthritis. The CT chest reports show consolidation in the lungs, suggesting pneumonia. The elevated ESR further supports an inflammatory process.",
+    "Error": "",
+    "ICD-10 Codes": {
+        "ICD_codes": [
+            "J18.9",
+            "M06.9",
+            "R05.9",
+            "R50.9"
+        ]
+    }
+}
