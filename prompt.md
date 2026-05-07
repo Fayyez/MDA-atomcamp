@@ -144,6 +144,112 @@ To ensure the debate is **detailed**, each agent’s system prompt must explicit
 ### Example of expected detail (Radiologist, Round 1):
 > “The HRCT chest shows extensive tree‑in‑bud nodules in all lobes, air trapping, and mild cylindrical bronchiectasis in lower lobes. Mediastinal and left hilar lymphadenopathy (short axis ~12mm). These findings are highly suggestive of an infectious bronchiolitis, with nontuberculous mycobacteria (NTM) being most likely (confidence 75%). Tuberculosis is a key differential (20%), and less likely hypersensitivity pneumonitis (5%). I recommend sputum AFB culture and PCR for MAC.”
 
+## Sample Patient JSON
+```json
+{
+    "patient_id": "1",
+    "personal_information": {
+        "name": "",
+        "gender": "Female",
+        "dob": "1965-11-20",
+        "age": 60
+    },
+    "vitals": {
+        "timestamp": null,
+        "weight": null,
+        "weight_unit": "kg",
+        "height": null,
+        "height_unit": "cm",
+        "blood_pressure": "110.0/60.0",
+        "temperature": 98.0,
+        "temperature_unit": "C",
+        "pulse": 127.0,
+        "pulse_unit": "/min",
+        "respiratory_rate": 18.0,
+        "respiratory_rate_unit": "/min"
+    },
+    "lab_results": [
+        {
+            "cpt_id": "001000000000085651",
+            "cpt_name": "ESR (Erythrocytes Sedimentation Rate)",
+            "date": "2025-12-02",
+            "results": {
+                "ESR": {
+                    "result": 104.0,
+                    "unit": "",
+                    "normal_range": [
+                        "",
+                        ""
+                    ]
+                }
+            }
+        },
+        {
+            "cpt_id": "001000000000082306",
+            "cpt_name": "25 Hydroxy Vitamin D,Serum",
+            "date": "2025-11-30",
+            "results": {
+                "25 Hydroxyvitamin D,Serum": {
+                    "result": 9.1,
+                    "unit": "",
+                    "normal_range": [
+                        "",
+                        ""
+                    ]
+                }
+            }
+        },
+        {
+            "cpt_id": "001000000000082560",
+            "cpt_name": "Total CALCIUM,Serum",
+            "date": "2025-11-30",
+            "results": {
+                "CALCIUM": {
+                    "result": 8.6,
+                    "unit": "",
+                    "normal_range": [
+                        "",
+                        ""
+                    ]
+                }
+            }
+        }
+    ],
+    "radiology_reports": [
+        {
+            "cpt_id": "1000000000070488",
+            "cpt_name": "C.T. Chest High Resolution  (HR Chest)",
+            "technique": "Multiple axial sections were taken through chest without I.V contrast injection (HRCT protocol).",
+            "result": "Air trapping with bronchial wall thickening in bilateral lung fields. Extensive areas of fine nodularity forming tree-in-bud pattern involving all lobes of both lungs. A few small areas of consolidation in right middle lobe and inferior lingular segment of left upper lobe and left lower lobe. Mild bronchiectasis in bilateral lower lobes. Normal trachea and major airway. No pleural effusion seen on either side. \n\nImages of mediastinal window show moderately enlarged aortopulmonary and left hilar lymphnodes. A few sections through upper abdomen are unremarkable. No significant skeletal abnormality. \n\n",
+            "conclusion": "Air trapping with bronchial wall thickening and mild cylindrical bronchiectasis in bilateral lower lobes. Clinical correlation is advised to rule out bronchial asthma. Extensive fine nodularity forming tree-in-bud pattern involving all lobes of both lung fields with few smaller areas of consolidation on either side. Mediastinal and left hilar lymphadenopathy. Findings are suggestive of inflammatory process. differential diagnosis includes pulmonary tuberculosis including atypical mycobacterium. Clinical and lab correlation suggested for further evaluation.  \n                                                           \nThis is an electronically generated report and does not require signature.",
+            "system_conclusion": "",
+            "file_path": "",
+            "date": "2026-03-09T11:11:02.108901+00:00"
+        }
+    ],
+    "medications": [],
+    "recent_encounters": [
+        {
+            "date": "2025-12-03T12:07:43+00:00",
+            "clinician": "Dr. Abdul Ghafoor",
+            "notes": "patient seen\nVITALLY STABLE\nPLAN DISCHARGE ON ATT AND DRUG SHEET MEDICINE AS ADVISED\nFOLLOW UP ON EXECUTIVE CLINIC ON NEXT SATURDAY AT 2PM WITH DR ABDULLAH ASGHAR\n\nPlan (including risks, benefits and alternatives): \n--------------------------------------------------\n.\n\nI confirm, that the assessment and plan have been discussed with patient/ family and that they have understood and agreed.",
+            "symptoms": []
+        },
+        {
+            "date": "2025-12-02T22:49:54+00:00",
+            "clinician": "Dr. Abdul Ghafoor",
+            "notes": "PATIENT SEEN\nVITALLY STABLE\nAFEBRILE\nFIX INSULIN \nINSULIN R 16 TDS\nLANTUS 10 HS\nDECREASE INJ SOLUMEDROL 15  IV OD\nULTIVAIR M WITH REVILIZER OD\nSTART ATT ACC TO WT  5 TAB MYRIN P FORTE PO OD\nPLUS VITA 6 OD\n\nBIG TOE DRAINAGE BY SURGERY DONE DAILY DRESSING\nADD, TAB AUGMENTIN 625MG PO TDS \nFOLLOW SPUTUM FOR AFB, GENE XPERT \nHRCT REPORT FOLLOW\nCST\n\n\nPlan (including risks, benefits and alternatives): \n--------------------------------------------------\n.\n\nI confirm, that the assessment and plan have been discussed with patient/ family and that they have understood and agreed.",
+            "symptoms": []
+        }
+    ],
+    "current_symptoms": [],
+    "known_medical_history": [
+        "Known case of diabetes, hypertension and rheumatoid arthritis, now presented with shortness of breath for 2 days, associated with exertional dyspnea and productive cough and low grade fever."
+    ],
+    "last_visit": "2025-12-03T12:07:43+00:00"
+}
+```
+
 ## Integration with Provided Sample JSON
 Given the sample patient (60F, diabetes, hypertension, rheumatoid arthritis, shortness of breath, HRCT with tree‑in‑bud, ESR 104, Vit D 9.1, already started ATT and steroids):
 - The debate should reveal that ATT was prescribed empirically for TB, but the pattern is more consistent with MAC.
