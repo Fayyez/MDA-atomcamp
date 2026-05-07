@@ -1,0 +1,24 @@
+# Virtual environments
+.venv
+venv/
+env/
+
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# OS specific metadata
+.DS_Store
+
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
