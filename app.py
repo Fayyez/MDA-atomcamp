@@ -792,7 +792,7 @@ def report_to_markdown(report: Dict[str, Any]) -> str:
 
 
 def _init_session_state() -> None:
-    defaults = {
+    defaults: Dict[str, Any] = {
         "patient_data": None,
         "round1_transcript": [],
         "round2_transcript": [],
@@ -803,6 +803,11 @@ def _init_session_state() -> None:
         "rag_persist_message": None,
         "debate_complete": False,
         "patient_source": None,
+        # form: dynamic row counters
+        "form_lab_count": 1,
+        "form_rad_count": 1,
+        "form_med_count": 0,
+        "form_enc_count": 1,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -1001,7 +1006,11 @@ def _run_debate() -> None:
 def _render_patient_tab() -> None:
     data = st.session_state.patient_data
     if not data:
-        st.info("Upload a patient JSON or click **Load sample patient** in the sidebar.")
+        st.info(
+            "No patient data loaded yet. "
+            "Use the **Enter Patient Data** tab to fill in a form, "
+            "upload a JSON file, or click **Load sample patient** in the sidebar."
+        )
         return
 
     personal = data.get("personal_information", {}) or {}
@@ -1398,6 +1407,423 @@ def _render_consensus_tab() -> None:
         )
 
 
+def _fk(section: str, idx: int, field: str) -> str:
+    """Build a unique widget key for the patient entry form."""
+    return f"pf_{section}_{idx}_{field}"
+
+
+def _render_patient_form_tab() -> None:
+    """Render a structured form that builds patient_data from scratch."""
+
+    st.subheader("Enter patient data manually")
+    st.caption(
+        "Fill in the fields below and click **Apply patient data** at the bottom. "
+        "All sections are optional except Patient ID. "
+        "You can also upload a JSON or load the sample patient from the sidebar."
+    )
+
+    # ------------------------------------------------------------------
+    # 1. Patient identity & demographics
+    # ------------------------------------------------------------------
+    st.markdown("#### Patient identity")
+    col_id, col_gender, col_dob, col_age = st.columns([1, 1, 1, 1])
+    with col_id:
+        patient_id = st.text_input("Patient ID", value="1", key="pf_patient_id")
+    with col_gender:
+        gender = st.selectbox(
+            "Gender",
+            ["", "Female", "Male", "Other", "Unknown"],
+            key="pf_gender",
+        )
+    with col_dob:
+        dob = st.text_input("Date of birth (YYYY-MM-DD)", value="", key="pf_dob")
+    with col_age:
+        age_raw = st.text_input("Age (years)", value="", key="pf_age")
+
+    # ------------------------------------------------------------------
+    # 2. Vitals
+    # ------------------------------------------------------------------
+    st.markdown("#### Vitals")
+    v1, v2, v3 = st.columns(3)
+    with v1:
+        bp = st.text_input("Blood pressure (e.g. 110/70)", value="", key="pf_bp")
+        pulse = st.text_input("Pulse (/min)", value="", key="pf_pulse")
+    with v2:
+        temp = st.text_input("Temperature", value="", key="pf_temp")
+        temp_unit = st.selectbox("Temp unit", ["C", "F"], key="pf_temp_unit")
+    with v3:
+        rr = st.text_input("Respiratory rate (/min)", value="", key="pf_rr")
+        wt_col, ht_col = st.columns(2)
+        with wt_col:
+            weight = st.text_input("Weight", value="", key="pf_weight")
+        with ht_col:
+            height = st.text_input("Height", value="", key="pf_height")
+    wunit_col, hunit_col = st.columns(2)
+    with wunit_col:
+        weight_unit = st.selectbox("Weight unit", ["kg", "lb"], key="pf_weight_unit")
+    with hunit_col:
+        height_unit = st.selectbox("Height unit", ["cm", "in"], key="pf_height_unit")
+
+    # ------------------------------------------------------------------
+    # 3. Medical history & symptoms
+    # ------------------------------------------------------------------
+    st.markdown("#### Medical history & current symptoms")
+    hist_col, symp_col = st.columns(2)
+    with hist_col:
+        history_raw = st.text_area(
+            "Known medical history (one entry per line)",
+            height=100,
+            placeholder="Known case of diabetes, hypertension ...",
+            key="pf_history",
+        )
+    with symp_col:
+        symptoms_raw = st.text_area(
+            "Current symptoms (one per line)",
+            height=100,
+            placeholder="Shortness of breath\nProductve cough",
+            key="pf_symptoms",
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Lab results (dynamic rows)
+    # ------------------------------------------------------------------
+    st.markdown("#### Lab results")
+    st.caption(
+        "Each row is one analyte result. Leave blank rows to skip them."
+    )
+    add_lab, rem_lab = st.columns([1, 1])
+    with add_lab:
+        if st.button("+ Add lab row", key="pf_add_lab"):
+            st.session_state.form_lab_count += 1
+            st.rerun()
+    with rem_lab:
+        if st.session_state.form_lab_count > 0:
+            if st.button("- Remove last lab row", key="pf_rem_lab"):
+                st.session_state.form_lab_count = max(
+                    0, st.session_state.form_lab_count - 1
+                )
+                st.rerun()
+
+    for i in range(st.session_state.form_lab_count):
+        with st.container(border=True):
+            lc1, lc2, lc3, lc4, lc5 = st.columns([2, 2, 1, 1, 1])
+            with lc1:
+                st.text_input(
+                    "Panel / test name",
+                    placeholder="ESR (Erythrocytes Sedimentation Rate)",
+                    key=_fk("lab", i, "panel"),
+                )
+            with lc2:
+                st.text_input(
+                    "Analyte name",
+                    placeholder="ESR",
+                    key=_fk("lab", i, "analyte"),
+                )
+            with lc3:
+                st.text_input(
+                    "Result",
+                    placeholder="104",
+                    key=_fk("lab", i, "result"),
+                )
+            with lc4:
+                st.text_input(
+                    "Unit",
+                    placeholder="mm/hr",
+                    key=_fk("lab", i, "unit"),
+                )
+            with lc5:
+                st.text_input(
+                    "Date (YYYY-MM-DD)",
+                    placeholder="2025-12-02",
+                    key=_fk("lab", i, "date"),
+                )
+
+    # ------------------------------------------------------------------
+    # 5. Radiology reports (dynamic rows)
+    # ------------------------------------------------------------------
+    st.markdown("#### Radiology reports")
+    add_rad, rem_rad = st.columns([1, 1])
+    with add_rad:
+        if st.button("+ Add radiology row", key="pf_add_rad"):
+            st.session_state.form_rad_count += 1
+            st.rerun()
+    with rem_rad:
+        if st.session_state.form_rad_count > 0:
+            if st.button("- Remove last radiology row", key="pf_rem_rad"):
+                st.session_state.form_rad_count = max(
+                    0, st.session_state.form_rad_count - 1
+                )
+                st.rerun()
+
+    for i in range(st.session_state.form_rad_count):
+        with st.container(border=True):
+            rc1, rc2 = st.columns([3, 1])
+            with rc1:
+                st.text_input(
+                    "Study name",
+                    placeholder="C.T. Chest High Resolution (HR Chest)",
+                    key=_fk("rad", i, "name"),
+                )
+            with rc2:
+                st.text_input(
+                    "Date",
+                    placeholder="2026-03-09",
+                    key=_fk("rad", i, "date"),
+                )
+            st.text_area(
+                "Technique",
+                placeholder="Multiple axial sections through chest without IV contrast (HRCT protocol).",
+                height=60,
+                key=_fk("rad", i, "technique"),
+            )
+            st.text_area(
+                "Findings",
+                placeholder="Air trapping with bronchial wall thickening in bilateral lung fields ...",
+                height=80,
+                key=_fk("rad", i, "result"),
+            )
+            st.text_area(
+                "Conclusion / impression",
+                placeholder="Findings suggestive of inflammatory/infectious process ...",
+                height=80,
+                key=_fk("rad", i, "conclusion"),
+            )
+
+    # ------------------------------------------------------------------
+    # 6. Medications (dynamic rows)
+    # ------------------------------------------------------------------
+    st.markdown("#### Current medications")
+    add_med, rem_med = st.columns([1, 1])
+    with add_med:
+        if st.button("+ Add medication row", key="pf_add_med"):
+            st.session_state.form_med_count += 1
+            st.rerun()
+    with rem_med:
+        if st.session_state.form_med_count > 0:
+            if st.button("- Remove last medication row", key="pf_rem_med"):
+                st.session_state.form_med_count = max(
+                    0, st.session_state.form_med_count - 1
+                )
+                st.rerun()
+
+    for i in range(st.session_state.form_med_count):
+        with st.container(border=True):
+            mc1, mc2, mc3 = st.columns([2, 1, 1])
+            with mc1:
+                st.text_input(
+                    "Drug name",
+                    placeholder="Isoniazid",
+                    key=_fk("med", i, "name"),
+                )
+            with mc2:
+                st.text_input(
+                    "Dose",
+                    placeholder="300 mg",
+                    key=_fk("med", i, "dose"),
+                )
+            with mc3:
+                st.text_input(
+                    "Frequency",
+                    placeholder="once daily",
+                    key=_fk("med", i, "frequency"),
+                )
+
+    # ------------------------------------------------------------------
+    # 7. Recent encounters (dynamic rows)
+    # ------------------------------------------------------------------
+    st.markdown("#### Recent encounters")
+    add_enc, rem_enc = st.columns([1, 1])
+    with add_enc:
+        if st.button("+ Add encounter row", key="pf_add_enc"):
+            st.session_state.form_enc_count += 1
+            st.rerun()
+    with rem_enc:
+        if st.session_state.form_enc_count > 0:
+            if st.button("- Remove last encounter row", key="pf_rem_enc"):
+                st.session_state.form_enc_count = max(
+                    0, st.session_state.form_enc_count - 1
+                )
+                st.rerun()
+
+    for i in range(st.session_state.form_enc_count):
+        with st.container(border=True):
+            ec1, ec2 = st.columns([2, 2])
+            with ec1:
+                st.text_input(
+                    "Date (ISO)",
+                    placeholder="2025-12-03T12:07:43+00:00",
+                    key=_fk("enc", i, "date"),
+                )
+            with ec2:
+                st.text_input(
+                    "Clinician",
+                    placeholder="Dr. Smith",
+                    key=_fk("enc", i, "clinician"),
+                )
+            st.text_area(
+                "Notes",
+                placeholder="Patient seen. Vitally stable ...",
+                height=90,
+                key=_fk("enc", i, "notes"),
+            )
+
+    # ------------------------------------------------------------------
+    # Submit: assemble JSON from all widgets and set session state
+    # ------------------------------------------------------------------
+    st.divider()
+    if st.button(
+        "Apply patient data",
+        type="primary",
+        use_container_width=True,
+        key="pf_submit",
+    ):
+        pid = (st.session_state.get("pf_patient_id") or "").strip() or "1"
+
+        # personal information
+        try:
+            age_val: Any = int(age_raw.strip()) if age_raw.strip() else None
+        except ValueError:
+            age_val = age_raw.strip() or None
+
+        personal = {
+            "name": "",
+            "gender": gender or "",
+            "dob": (dob or "").strip(),
+            "age": age_val,
+        }
+
+        # vitals — convert numeric strings to floats where possible
+        def _to_float_or_none(s: str) -> Any:
+            try:
+                return float(s.strip())
+            except (ValueError, AttributeError):
+                return None if not s.strip() else s.strip()
+
+        vitals: Dict[str, Any] = {
+            "blood_pressure": bp.strip() or None,
+            "temperature": _to_float_or_none(temp),
+            "temperature_unit": temp_unit,
+            "pulse": _to_float_or_none(pulse),
+            "pulse_unit": "/min",
+            "respiratory_rate": _to_float_or_none(rr),
+            "respiratory_rate_unit": "/min",
+            "weight": _to_float_or_none(weight),
+            "weight_unit": weight_unit,
+            "height": _to_float_or_none(height),
+            "height_unit": height_unit,
+            "timestamp": None,
+        }
+
+        # history & symptoms (one per line, filter blanks)
+        history_list = [
+            l.strip() for l in history_raw.splitlines() if l.strip()
+        ]
+        symptoms_list = [
+            l.strip() for l in symptoms_raw.splitlines() if l.strip()
+        ]
+
+        # lab results
+        lab_results: List[Dict[str, Any]] = []
+        for i in range(st.session_state.form_lab_count):
+            analyte = (st.session_state.get(_fk("lab", i, "analyte")) or "").strip()
+            result_str = (st.session_state.get(_fk("lab", i, "result")) or "").strip()
+            if not analyte and not result_str:
+                continue
+            try:
+                result_val: Any = float(result_str) if result_str else None
+            except ValueError:
+                result_val = result_str or None
+            panel = (st.session_state.get(_fk("lab", i, "panel")) or "").strip() or analyte
+            lab_results.append(
+                {
+                    "cpt_id": f"manual_{i:04d}",
+                    "cpt_name": panel,
+                    "date": (st.session_state.get(_fk("lab", i, "date")) or "").strip() or None,
+                    "results": {
+                        analyte or "result": {
+                            "result": result_val,
+                            "unit": (st.session_state.get(_fk("lab", i, "unit")) or "").strip(),
+                            "normal_range": ["", ""],
+                        }
+                    },
+                }
+            )
+
+        # radiology reports
+        radiology: List[Dict[str, Any]] = []
+        for i in range(st.session_state.form_rad_count):
+            name = (st.session_state.get(_fk("rad", i, "name")) or "").strip()
+            findings = (st.session_state.get(_fk("rad", i, "result")) or "").strip()
+            conclusion = (st.session_state.get(_fk("rad", i, "conclusion")) or "").strip()
+            if not name and not findings and not conclusion:
+                continue
+            radiology.append(
+                {
+                    "cpt_id": f"manual_rad_{i:04d}",
+                    "cpt_name": name or "Imaging",
+                    "technique": (st.session_state.get(_fk("rad", i, "technique")) or "").strip(),
+                    "result": findings,
+                    "conclusion": conclusion,
+                    "system_conclusion": "",
+                    "file_path": "",
+                    "date": (st.session_state.get(_fk("rad", i, "date")) or "").strip() or None,
+                }
+            )
+
+        # medications
+        medications: List[Dict[str, str]] = []
+        for i in range(st.session_state.form_med_count):
+            drug = (st.session_state.get(_fk("med", i, "name")) or "").strip()
+            if not drug:
+                continue
+            medications.append(
+                {
+                    "name": drug,
+                    "dose": (st.session_state.get(_fk("med", i, "dose")) or "").strip(),
+                    "frequency": (st.session_state.get(_fk("med", i, "frequency")) or "").strip(),
+                }
+            )
+
+        # recent encounters
+        encounters: List[Dict[str, str]] = []
+        for i in range(st.session_state.form_enc_count):
+            notes = (st.session_state.get(_fk("enc", i, "notes")) or "").strip()
+            enc_date = (st.session_state.get(_fk("enc", i, "date")) or "").strip()
+            clinician = (st.session_state.get(_fk("enc", i, "clinician")) or "").strip()
+            if not notes and not clinician:
+                continue
+            encounters.append(
+                {
+                    "date": enc_date or None,
+                    "clinician": clinician,
+                    "notes": notes,
+                    "symptoms": [],
+                }
+            )
+
+        patient_data: Dict[str, Any] = {
+            "patient_id": pid,
+            "personal_information": personal,
+            "vitals": vitals,
+            "known_medical_history": history_list,
+            "current_symptoms": symptoms_list,
+            "lab_results": lab_results,
+            "radiology_reports": radiology,
+            "medications": medications,
+            "recent_encounters": encounters,
+            "last_visit": encounters[0].get("date") if encounters else None,
+        }
+
+        st.session_state.patient_data = patient_data
+        st.session_state.patient_source = "manual form"
+        _reset_debate_state()
+        st.success(
+            f"Patient data applied (ID: `{pid}`). "
+            "Switch to the **Patient Summary** tab to review, "
+            "then run the debate from the sidebar."
+        )
+
+
 def main() -> None:
     _init_session_state()
 
@@ -1412,9 +1838,11 @@ def main() -> None:
 
     _render_sidebar()
 
-    summary_tab, debate_tab, consensus_tab = st.tabs(
-        ["Patient Summary", "Debate Transcript", "Consensus Report"]
+    entry_tab, summary_tab, debate_tab, consensus_tab = st.tabs(
+        ["Enter Patient Data", "Patient Summary", "Debate Transcript", "Consensus Report"]
     )
+    with entry_tab:
+        _render_patient_form_tab()
     with summary_tab:
         _render_patient_tab()
     with debate_tab:

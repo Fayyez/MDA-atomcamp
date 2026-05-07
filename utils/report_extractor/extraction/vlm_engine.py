@@ -1,29 +1,35 @@
 # midas_extraction/extraction/vlm_engine.py
 
 import json
-import ollama
+import base64
+import io
+import os
+from openai import OpenAI
 from PIL import Image
 from typing import Type
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
+load_dotenv()
 
 class VLMEngine:
     """
-    Vision-Language extraction engine using local Ollama Qwen2.5-VL.
+    Vision-Language extraction engine using OpenAI GPT-4o.
 
     This module:
-    - sends image + prompt to Ollama
+    - sends image + prompt to OpenAI
     - receives structured JSON
     - returns parsed dict
     """
 
     def __init__(
         self,
-        model_name: str = "qwen2.5vl",
+        model_name: str = "gpt-4o",
         temperature: float = 0.0,
     ):
         self.model_name = model_name
         self.temperature = temperature
+        self.client = OpenAI()  # Expects OPENAI_API_KEY environment variable
 
     def extract(
         self,
@@ -66,28 +72,36 @@ Rules:
         if system_prompt:
             prompt = system_prompt + "\n\n" + prompt
 
-        # Convert PIL image to bytes
-        import io
+        # Convert PIL image to base64
         image_bytes = io.BytesIO()
         image.save(image_bytes, format="PNG")
-        image_bytes = image_bytes.getvalue()
+        base64_image = base64.b64encode(image_bytes.getvalue()).decode("utf-8")
 
-        # Call Ollama
-        response = ollama.chat(
+        # Call OpenAI
+        response = self.client.chat.completions.create(
             model=self.model_name,
-            options={
-                "temperature": self.temperature,
-            },
+            temperature=self.temperature,
+            response_format={"type": "json_object"},
             messages=[
                 {
                     "role": "user",
-                    "content": prompt,
-                    "images": [image_bytes],
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
                 }
             ],
         )
 
-        content = response["message"]["content"]
+        content = response.choices[0].message.content
 
         # Parse JSON safely
         try:
