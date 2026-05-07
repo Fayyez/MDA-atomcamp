@@ -45,11 +45,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-API_KEY = os.getenv("OPENAI_API_KEY")
+API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPEN_AI_API_KEY")
 if not API_KEY:
     st.error(
         "OpenAI API key not found in environment. "
         "Create a `.env` file with `OPENAI_API_KEY=your_key_here` "
+        "(or legacy `OPEN_AI_API_KEY=your_key_here`) "
         "(see `.env.example`) and restart the app."
     )
     st.stop()
@@ -111,8 +112,7 @@ AGENT_SYSTEM_PROMPTS: Dict[str, str] = {
         "lymphadenopathy, bronchiectasis, consolidation, effusion) and the "
         "anatomic distribution. Provide an imaging-based differential "
         "diagnosis with a numeric confidence for each entry, and suggest "
-        "follow-up imaging or alternative modalities if useful."
-        + DETAIL_REQUIREMENTS
+        "follow-up imaging or alternative modalities if useful." + DETAIL_REQUIREMENTS
     ),
     "Pathologist": (
         "You are a clinical pathologist with expertise in lab medicine and "
@@ -132,8 +132,7 @@ AGENT_SYSTEM_PROMPTS: Dict[str, str] = {
         "numeric confidence. If suspicious, propose a staging workup "
         "(imaging, biomarkers, biopsy targets), discuss systemic therapy "
         "options at a high level, and comment on treatment urgency and "
-        "expected outcomes."
-        + DETAIL_REQUIREMENTS
+        "expected outcomes." + DETAIL_REQUIREMENTS
     ),
     "Surgeon": (
         "You are a senior cardiothoracic / general surgeon. Assess whether "
@@ -142,8 +141,7 @@ AGENT_SYSTEM_PROMPTS: Dict[str, str] = {
         "vitals, and lab data. Consider surgical risk in light of `vitals` "
         "and comorbidities. State clearly whether surgery is necessary, "
         "elective, or not indicated, and provide a concise risk-benefit "
-        "discussion in prose."
-        + DETAIL_REQUIREMENTS
+        "discussion in prose." + DETAIL_REQUIREMENTS
     ),
     "Pharmacist": (
         "You are a senior clinical pharmacist. Review `medications` already "
@@ -164,8 +162,7 @@ AGENT_SYSTEM_PROMPTS: Dict[str, str] = {
         "(citing public US AWP / international references qualitatively, "
         "e.g. 'azithromycin 250mg daily ~$10/month'). Suggest equivalent "
         "lower-cost alternatives that do not compromise quality, and give "
-        "an out-of-pocket estimate range."
-        + DETAIL_REQUIREMENTS
+        "an out-of-pocket estimate range." + DETAIL_REQUIREMENTS
     ),
 }
 
@@ -294,8 +291,7 @@ def _format_radiology(reports: List[Dict[str, Any]]) -> str:
     lines = ["Radiology reports:"]
     for r in reports:
         lines.append(
-            f"- {r.get('cpt_name', 'Imaging')} "
-            f"({r.get('date', 'date n/a')})"
+            f"- {r.get('cpt_name', 'Imaging')} " f"({r.get('date', 'date n/a')})"
         )
         if r.get("technique"):
             lines.append(f"  Technique: {r['technique']}")
@@ -350,13 +346,11 @@ def build_patient_summary(data: Dict[str, Any]) -> str:
         f"age {personal.get('age', 'unknown')} "
         f"(DOB {personal.get('dob', 'unknown')})."
     )
-    history_block = (
-        "Known medical history:\n"
-        + ("\n".join(f"  - {h}" for h in history) if history else "  - none recorded")
+    history_block = "Known medical history:\n" + (
+        "\n".join(f"  - {h}" for h in history) if history else "  - none recorded"
     )
-    symptoms_block = (
-        "Current symptoms:\n"
-        + ("\n".join(f"  - {s}" for s in symptoms) if symptoms else "  - none recorded")
+    symptoms_block = "Current symptoms:\n" + (
+        "\n".join(f"  - {s}" for s in symptoms) if symptoms else "  - none recorded"
     )
 
     return "\n\n".join(
@@ -406,13 +400,13 @@ def call_agent(
         except OpenAIError as exc:
             last_err = exc
             if attempt < RETRY_ATTEMPTS:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
             else:
                 break
         except Exception as exc:  # network etc.
             last_err = exc
             if attempt < RETRY_ATTEMPTS:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
             else:
                 break
 
@@ -566,9 +560,7 @@ def get_retriever() -> Optional[RAGRetriever]:
     try:
         return RAGRetriever(api_key=API_KEY)
     except Exception as exc:  # noqa: BLE001 - surfaced once via UI warning
-        st.warning(
-            f"RAG index unavailable, validation phase will be skipped: {exc}"
-        )
+        st.warning(f"RAG index unavailable, validation phase will be skipped: {exc}")
         return None
 
 
@@ -613,9 +605,7 @@ def validate_with_rag(
     except (TypeError, ValueError):
         pass
 
-    cases = retriever.retrieve(
-        clinical_text, k=k, exclude_mrnos=exclude or None
-    )
+    cases = retriever.retrieve(clinical_text, k=k, exclude_mrnos=exclude or None)
 
     user_payload = (
         f"PATIENT_SUMMARY:\n{build_patient_summary(patient_data)}\n\n"
@@ -709,7 +699,8 @@ def report_to_markdown(report: Dict[str, Any]) -> str:
             "# MDT Consensus Report\n\n"
             f"> Parsing error: {report['_parse_error']}\n\n"
             "## Raw moderator response\n\n```\n"
-            + str(report.get("raw_response", "")) + "\n```\n"
+            + str(report.get("raw_response", ""))
+            + "\n```\n"
         )
 
     diag = report.get("diagnosis", {}) or {}
@@ -718,21 +709,27 @@ def report_to_markdown(report: Dict[str, Any]) -> str:
     pharma = plan.get("pharmacotherapy", {}) or {}
     cost = report.get("cost_analysis", {}) or {}
 
-    differentials = "\n".join(
-        f"- {d.get('diagnosis', 'n/a')} ({d.get('confidence', 'n/a')}%)"
-        for d in (diag.get("differentials") or [])
-    ) or "- none"
+    differentials = (
+        "\n".join(
+            f"- {d.get('diagnosis', 'n/a')} ({d.get('confidence', 'n/a')}%)"
+            for d in (diag.get("differentials") or [])
+        )
+        or "- none"
+    )
 
-    recommendations = "\n".join(
-        f"{i + 1}. {step}"
-        for i, step in enumerate(plan.get("recommendations") or [])
-    ) or "_none_"
+    recommendations = (
+        "\n".join(
+            f"{i + 1}. {step}"
+            for i, step in enumerate(plan.get("recommendations") or [])
+        )
+        or "_none_"
+    )
 
     risks = ", ".join(surgery.get("risks") or []) or "n/a"
 
-    unresolved = "\n".join(
-        f"- {q}" for q in (report.get("unresolved_issues") or [])
-    ) or "- none"
+    unresolved = (
+        "\n".join(f"- {q}" for q in (report.get("unresolved_issues") or [])) or "- none"
+    )
 
     md = f"""# MDT Consensus Report
 
@@ -840,7 +837,9 @@ def _render_sidebar() -> None:
         )
         if uploaded is not None:
             try:
-                st.session_state.patient_data = json.loads(uploaded.read().decode("utf-8"))
+                st.session_state.patient_data = json.loads(
+                    uploaded.read().decode("utf-8")
+                )
                 st.session_state.patient_source = uploaded.name
                 _reset_debate_state()
                 st.success(f"Loaded `{uploaded.name}`.")
@@ -857,7 +856,9 @@ def _render_sidebar() -> None:
                     st.session_state.patient_data = json.load(fh)
                 st.session_state.patient_source = SAMPLE_PATIENT_PATH.as_posix()
                 _reset_debate_state()
-                st.success(f"Loaded sample patient from `{SAMPLE_PATIENT_PATH.as_posix()}`.")
+                st.success(
+                    f"Loaded sample patient from `{SAMPLE_PATIENT_PATH.as_posix()}`."
+                )
             except FileNotFoundError:
                 st.error(f"Sample file not found at {SAMPLE_PATIENT_PATH}.")
             except json.JSONDecodeError as exc:
@@ -982,9 +983,7 @@ def _run_debate() -> None:
                         "retrieved cases."
                     )
                 except Exception as exc:  # noqa: BLE001 - surfaced in UI
-                    st.warning(
-                        f"RAG validation failed, using draft consensus: {exc}"
-                    )
+                    st.warning(f"RAG validation failed, using draft consensus: {exc}")
                     st.session_state.validated_report = None
                     st.session_state.rag_examples = []
             else:
@@ -1133,7 +1132,9 @@ def _render_patient_tab() -> None:
         st.json(data)
 
 
-def _render_round_transcript(transcript: List[Dict[str, str]], round_label: str) -> None:
+def _render_round_transcript(
+    transcript: List[Dict[str, str]], round_label: str
+) -> None:
     if not transcript:
         st.info(f"{round_label} has not been run yet.")
         return
@@ -1143,20 +1144,19 @@ def _render_round_transcript(transcript: List[Dict[str, str]], round_label: str)
 
 
 def _render_debate_tab() -> None:
-    if not st.session_state.round1_transcript and not st.session_state.round2_transcript:
+    if (
+        not st.session_state.round1_transcript
+        and not st.session_state.round2_transcript
+    ):
         st.info(
             "Run the debate from the sidebar to populate Round 1 and Round 2 transcripts."
         )
         return
     r1_tab, r2_tab = st.tabs(["Round 1 - Initial positions", "Round 2 - Rebuttals"])
     with r1_tab:
-        _render_round_transcript(
-            st.session_state.round1_transcript, "Round 1"
-        )
+        _render_round_transcript(st.session_state.round1_transcript, "Round 1")
     with r2_tab:
-        _render_round_transcript(
-            st.session_state.round2_transcript, "Round 2"
-        )
+        _render_round_transcript(st.session_state.round2_transcript, "Round 2")
 
 
 def _render_retrieved_cases_panel(cases: List[Dict[str, Any]]) -> None:
@@ -1258,8 +1258,12 @@ def _render_consensus_tab() -> None:
         )
         if draft and "_parse_error" not in draft:
             try:
-                draft_conf = int((draft.get("diagnosis") or {}).get("confidence", 0) or 0)
-                final_conf = int((report.get("diagnosis") or {}).get("confidence", 0) or 0)
+                draft_conf = int(
+                    (draft.get("diagnosis") or {}).get("confidence", 0) or 0
+                )
+                final_conf = int(
+                    (report.get("diagnosis") or {}).get("confidence", 0) or 0
+                )
                 delta = final_conf - draft_conf
                 draft_dx = (draft.get("diagnosis") or {}).get("primary_diagnosis", "")
                 final_dx = (report.get("diagnosis") or {}).get("primary_diagnosis", "")
@@ -1309,8 +1313,7 @@ def _render_consensus_tab() -> None:
         st.markdown("**Differentials:**")
         for d in differentials:
             st.markdown(
-                f"- {d.get('diagnosis', 'n/a')} "
-                f"({d.get('confidence', 'n/a')}%)"
+                f"- {d.get('diagnosis', 'n/a')} " f"({d.get('confidence', 'n/a')}%)"
             )
 
     st.subheader("Treatment plan")
@@ -1380,9 +1383,7 @@ def _render_consensus_tab() -> None:
         _render_verification_controls(report, st.session_state.patient_data)
 
     with st.expander("Raw consensus JSON"):
-        st.json(
-            {k: v for k, v in report.items() if not k.startswith("_")}
-        )
+        st.json({k: v for k, v in report.items() if not k.startswith("_")})
 
     public_report = {k: v for k, v in report.items() if not k.startswith("_")}
     json_bytes = json.dumps(public_report, indent=2).encode("utf-8")
@@ -1488,9 +1489,7 @@ def _render_patient_form_tab() -> None:
     # 4. Lab results (dynamic rows)
     # ------------------------------------------------------------------
     st.markdown("#### Lab results")
-    st.caption(
-        "Each row is one analyte result. Leave blank rows to skip them."
-    )
+    st.caption("Each row is one analyte result. Leave blank rows to skip them.")
     add_lab, rem_lab = st.columns([1, 1])
     with add_lab:
         if st.button("+ Add lab row", key="pf_add_lab"):
@@ -1715,12 +1714,8 @@ def _render_patient_form_tab() -> None:
         }
 
         # history & symptoms (one per line, filter blanks)
-        history_list = [
-            l.strip() for l in history_raw.splitlines() if l.strip()
-        ]
-        symptoms_list = [
-            l.strip() for l in symptoms_raw.splitlines() if l.strip()
-        ]
+        history_list = [l.strip() for l in history_raw.splitlines() if l.strip()]
+        symptoms_list = [l.strip() for l in symptoms_raw.splitlines() if l.strip()]
 
         # lab results
         lab_results: List[Dict[str, Any]] = []
@@ -1733,16 +1728,22 @@ def _render_patient_form_tab() -> None:
                 result_val: Any = float(result_str) if result_str else None
             except ValueError:
                 result_val = result_str or None
-            panel = (st.session_state.get(_fk("lab", i, "panel")) or "").strip() or analyte
+            panel = (
+                st.session_state.get(_fk("lab", i, "panel")) or ""
+            ).strip() or analyte
             lab_results.append(
                 {
                     "cpt_id": f"manual_{i:04d}",
                     "cpt_name": panel,
-                    "date": (st.session_state.get(_fk("lab", i, "date")) or "").strip() or None,
+                    "date": (st.session_state.get(_fk("lab", i, "date")) or "").strip()
+                    or None,
                     "results": {
-                        analyte or "result": {
+                        analyte
+                        or "result": {
                             "result": result_val,
-                            "unit": (st.session_state.get(_fk("lab", i, "unit")) or "").strip(),
+                            "unit": (
+                                st.session_state.get(_fk("lab", i, "unit")) or ""
+                            ).strip(),
                             "normal_range": ["", ""],
                         }
                     },
@@ -1754,19 +1755,24 @@ def _render_patient_form_tab() -> None:
         for i in range(st.session_state.form_rad_count):
             name = (st.session_state.get(_fk("rad", i, "name")) or "").strip()
             findings = (st.session_state.get(_fk("rad", i, "result")) or "").strip()
-            conclusion = (st.session_state.get(_fk("rad", i, "conclusion")) or "").strip()
+            conclusion = (
+                st.session_state.get(_fk("rad", i, "conclusion")) or ""
+            ).strip()
             if not name and not findings and not conclusion:
                 continue
             radiology.append(
                 {
                     "cpt_id": f"manual_rad_{i:04d}",
                     "cpt_name": name or "Imaging",
-                    "technique": (st.session_state.get(_fk("rad", i, "technique")) or "").strip(),
+                    "technique": (
+                        st.session_state.get(_fk("rad", i, "technique")) or ""
+                    ).strip(),
                     "result": findings,
                     "conclusion": conclusion,
                     "system_conclusion": "",
                     "file_path": "",
-                    "date": (st.session_state.get(_fk("rad", i, "date")) or "").strip() or None,
+                    "date": (st.session_state.get(_fk("rad", i, "date")) or "").strip()
+                    or None,
                 }
             )
 
@@ -1780,7 +1786,9 @@ def _render_patient_form_tab() -> None:
                 {
                     "name": drug,
                     "dose": (st.session_state.get(_fk("med", i, "dose")) or "").strip(),
-                    "frequency": (st.session_state.get(_fk("med", i, "frequency")) or "").strip(),
+                    "frequency": (
+                        st.session_state.get(_fk("med", i, "frequency")) or ""
+                    ).strip(),
                 }
             )
 
@@ -1839,7 +1847,12 @@ def main() -> None:
     _render_sidebar()
 
     entry_tab, summary_tab, debate_tab, consensus_tab = st.tabs(
-        ["Enter Patient Data", "Patient Summary", "Debate Transcript", "Consensus Report"]
+        [
+            "Enter Patient Data",
+            "Patient Summary",
+            "Debate Transcript",
+            "Consensus Report",
+        ]
     )
     with entry_tab:
         _render_patient_form_tab()
