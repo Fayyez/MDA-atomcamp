@@ -1,0 +1,11 @@
+{
+  "patient": {
+    "name": null,
+    "age": null,
+    "gender": null,
+    "report_date": null
+  },
+  "lab_tests": [],
+  "diagnosis": [],
+  "notes": null
+}
