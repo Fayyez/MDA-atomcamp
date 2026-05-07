@@ -23,6 +23,20 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
 
+# Optional heavy deps — imported lazily inside helpers so app starts even if
+# the user hasn't installed them yet.
+try:
+    import fitz as _pymupdf  # PyMuPDF
+    _PYMUPDF_AVAILABLE = True
+except ImportError:
+    _PYMUPDF_AVAILABLE = False
+
+try:
+    from PIL import Image as _PilImage
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Environment & client setup
@@ -54,9 +68,12 @@ client = OpenAI(api_key=API_KEY)
 # ---------------------------------------------------------------------------
 
 MODEL = "gpt-4o-mini"
-TEMP_R1 = 0.2
-TEMP_R2 = 0.25
-TEMP_MOD = 0.2
+# TEMP_R1 = 0.2
+# TEMP_R2 = 0.25
+# TEMP_MOD = 0.2
+TEMP_R1 = 0.05
+TEMP_R2 = 0.05
+TEMP_MOD = 0.05
 MAX_TOKENS_AGENT = 800
 MAX_TOKENS_MODERATOR = 1600
 RETRY_ATTEMPTS = 2
@@ -641,6 +658,122 @@ def report_to_markdown(report: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Lab report extraction helpers
+# ---------------------------------------------------------------------------
+
+
+def _pdf_bytes_to_pil_images(pdf_bytes: bytes) -> List[Any]:
+    """Convert every page of a PDF to a PIL Image (RGB) at ~144 DPI."""
+    if not _PYMUPDF_AVAILABLE:
+        raise RuntimeError(
+            "PyMuPDF is not installed. Run `pip install pymupdf` to enable PDF support."
+        )
+    doc = _pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    images = []
+    for page in doc:
+        mat = _pymupdf.Matrix(2.0, 2.0)  # 2× zoom → ~144 DPI
+        pix = page.get_pixmap(matrix=mat)
+        img = _PilImage.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        images.append(img)
+    doc.close()
+    return images
+
+
+def _bytes_to_pil_image(raw: bytes) -> Any:
+    """Open image bytes as a PIL Image."""
+    if not _PIL_AVAILABLE:
+        raise RuntimeError("Pillow is not installed. Run `pip install Pillow`.")
+    import io
+    return _PilImage.open(io.BytesIO(raw)).convert("RGB")
+
+
+def _run_extraction(pil_image: Any) -> Dict[str, Any]:
+    """Call the report extractor pipeline on a single PIL image."""
+    import sys
+    from pathlib import Path as _Path
+
+    # Ensure the project root is on sys.path so `utils` is importable.
+    project_root = str(_Path(__file__).resolve().parent)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+    from utils.report_extractor.extractor import extract_from_image  # type: ignore
+    return extract_from_image(pil_image)
+
+
+def _map_extracted_to_form_rows(
+    extracted: Dict[str, Any],
+    report_date: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """
+    Map a MedicalReport dict (from the extractor) to a flat list of form-row
+    dicts with keys: panel, analyte, result, unit, date.
+    """
+    rows: List[Dict[str, str]] = []
+    lab_tests = extracted.get("lab_tests") or []
+
+    # Try to extract a date from the patient block.
+    patient_block = extracted.get("patient") or {}
+    raw_date = report_date or str(patient_block.get("report_date") or "")
+
+    for lt in lab_tests:
+        test_name = str(lt.get("test_name") or "").strip()
+        value = str(lt.get("value") or "").strip()
+        if not test_name and not value:
+            continue
+        rows.append(
+            {
+                "panel": test_name,
+                "analyte": test_name,
+                "result": value,
+                "unit": str(lt.get("unit") or "").strip(),
+                "date": raw_date,
+            }
+        )
+    return rows
+
+
+def _prefill_lab_rows_in_session(rows: List[Dict[str, str]]) -> None:
+    """
+    Write extracted rows into session-state widget keys so the form
+    renders them as pre-filled on the next rerun.
+    """
+    st.session_state.form_lab_count = max(len(rows), 1)
+    for i, row in enumerate(rows):
+        st.session_state[_fk("lab", i, "panel")] = row.get("panel", "")
+        st.session_state[_fk("lab", i, "analyte")] = row.get("analyte", "")
+        st.session_state[_fk("lab", i, "result")] = row.get("result", "")
+        st.session_state[_fk("lab", i, "unit")] = row.get("unit", "")
+        st.session_state[_fk("lab", i, "date")] = row.get("date", "")
+
+
+def _do_lab_extraction(file_bytes: bytes, filename: str) -> None:
+    """
+    End-to-end: convert upload → PIL images → extract → prefill form rows.
+    Raises on error; caller wraps in try/except to show st.error.
+    """
+    ext = filename.rsplit(".", 1)[-1].lower()
+
+    if ext == "pdf":
+        pil_images = _pdf_bytes_to_pil_images(file_bytes)
+    else:
+        pil_images = [_bytes_to_pil_image(file_bytes)]
+
+    all_rows: List[Dict[str, str]] = []
+    for pil_img in pil_images:
+        extracted = _run_extraction(pil_img)
+        all_rows.extend(_map_extracted_to_form_rows(extracted))
+
+    if not all_rows:
+        raise ValueError(
+            "No lab tests could be extracted from the report. "
+            "Check that the image shows lab result data clearly."
+        )
+
+    _prefill_lab_rows_in_session(all_rows)
+
+
+# ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
@@ -1176,9 +1309,56 @@ def _render_patient_form_tab() -> None:
         )
 
     # ------------------------------------------------------------------
-    # 4. Lab results (dynamic rows)
+    # 4. Lab results (dynamic rows + optional image/PDF import)
     # ------------------------------------------------------------------
     st.markdown("#### Lab results")
+
+    with st.expander("Import from lab report (image or PDF)", expanded=False):
+        st.caption(
+            "Upload a scanned or photographed lab report. "
+            "The AI will extract analyte names, values, and units and "
+            "pre-fill the rows below. Supported formats: JPG, PNG, PDF."
+        )
+        lab_report_file = st.file_uploader(
+            "Lab report file",
+            type=["jpg", "jpeg", "png", "pdf"],
+            key="pf_lab_report_upload",
+            label_visibility="collapsed",
+        )
+        if lab_report_file is not None:
+            extract_col, info_col = st.columns([1, 3])
+            with extract_col:
+                do_extract = st.button(
+                    "Extract lab data",
+                    key="pf_extract_labs_btn",
+                    type="primary",
+                    use_container_width=True,
+                )
+            with info_col:
+                st.caption(
+                    f"Uploaded: **{lab_report_file.name}** "
+                    f"({lab_report_file.size // 1024} KB). "
+                    "Click **Extract lab data** to run AI extraction "
+                    "and pre-fill the rows below."
+                )
+            if do_extract:
+                with st.spinner(
+                    "Running extraction pipeline — this may take 10-20 seconds..."
+                ):
+                    try:
+                        _do_lab_extraction(
+                            lab_report_file.getvalue(),
+                            lab_report_file.name,
+                        )
+                        st.success(
+                            f"Extracted {st.session_state.form_lab_count} "
+                            "lab result row(s). Review and edit below, then "
+                            "click **Apply patient data**."
+                        )
+                        st.rerun()
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Extraction failed: {exc}")
+
     st.caption(
         "Each row is one analyte result. Leave blank rows to skip them."
     )
