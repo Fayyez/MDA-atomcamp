@@ -33,7 +33,7 @@ def extract_structured_data_from_report(image_path: str) -> dict:
     return validated_report.model_dump(mode="json")
 """
 
-from .extractor import run_example
+from .extractor import run_example, extract_from_image
 
-__all__ = ["run_example"]
+__all__ = ["run_example", "extract_from_image"]
 
